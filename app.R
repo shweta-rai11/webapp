@@ -445,14 +445,26 @@ server <- function(input, output, session) {
       feature_data <- fData(gse)
 
       # Preprocessing with minimal copies
+      # 1) Remove rows with any NA (match original complete.cases)
       exprs_data <- exprs_data[rowSums(is.na(exprs_data)) == 0, , drop = FALSE]
+
+      # 2) Filter by raw-scale variance > 0.01 (match original)
+      raw_var <- matrixStats::rowVars(exprs_data)
+      exprs_data <- exprs_data[raw_var > 0.01, , drop = FALSE]
+
+      # 3) Log2 transform
       exprs_data <- log2(exprs_data + 1)
 
-      # Keep only top N most variable genes to reduce memory
+      # 4) Filter by row mean threshold (25th percentile) on the log scale (match original)
+      threshold <- stats::quantile(rowMeans(exprs_data), 0.25)
+      exprs_data <- exprs_data[rowMeans(exprs_data) > threshold, , drop = FALSE]
+
+      # 5) After matching original preprocessing, cap to top 1000 most-variable genes to keep memory safe
       gene_var <- matrixStats::rowVars(exprs_data)
-      keep_idx <- order(gene_var, decreasing = TRUE)
-      top_n <- min(length(keep_idx), 5000L)
-      exprs_data <- exprs_data[keep_idx[seq_len(top_n)], , drop = FALSE]
+      if (nrow(exprs_data) > 1000L) {
+        keep_idx <- order(gene_var, decreasing = TRUE)
+        exprs_data <- exprs_data[keep_idx[seq_len(1000L)], , drop = FALSE]
+      }
 
       # Lightweight annotation mapping only
       gene_symbol <- feature_data[rownames(exprs_data), "Gene symbol"]
