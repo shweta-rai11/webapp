@@ -7,6 +7,8 @@ library(pheatmap)
 library(bslib)
 library(shinyjs)
 library(googledrive)
+library(matrixStats)
+options(shiny.sanitize.errors = TRUE)
 
 
 ui <- fluidPage(
@@ -431,91 +433,98 @@ server <- function(input, output, session) {
 
   observeEvent(input$run, {
     req(gse_data())
-
     showModal(modalDialog("Processing data...", footer = NULL))
+    on.exit(removeModal(), add = TRUE)
 
     tryCatch({
-      withProgress(message = "Running DEG Analysis...", value = 0.1, {
+      withProgress(message = "Running DEG...", value = 0, {
         gse <- gse_data()[[1]]
-        
+        incProgress(0.05)
+
         exprs_data <- exprs(gse)
         pheno_data <- pData(gse)
         feature_data <- fData(gse)
+        incProgress(0.1)
 
-        # Data preprocessing
-        exprs_data <- exprs_data[complete.cases(exprs_data), ]
-        exprs_data <- exprs_data[apply(exprs_data, 1, var) > 0.01, ]
+        # Match original preprocessing, then cap to keep memory safe
+        exprs_data <- exprs_data[rowSums(is.na(exprs_data)) == 0, , drop = FALSE]
+        raw_var <- matrixStats::rowVars(exprs_data)
+        exprs_data <- exprs_data[raw_var > 0.01, , drop = FALSE]
+        incProgress(0.15)
         exprs_data <- log2(exprs_data + 1)
-        threshold <- quantile(rowMeans(exprs_data), 0.25)
-        exprs_data <- exprs_data[rowMeans(exprs_data) > threshold, ]
+        threshold <- stats::quantile(rowMeans(exprs_data), 0.25)
+        exprs_data <- exprs_data[rowMeans(exprs_data) > threshold, , drop = FALSE]
+        incProgress(0.25)
 
-        # Annotate with gene symbols
-        exprs_annotated <- data.frame(probe_id = rownames(exprs_data), exprs_data)
-        exprs_annotated$gene_symbol <- feature_data[rownames(exprs_data), "Gene symbol"]
-        exprs_annotated$gene_symbol <- sapply(strsplit(as.character(exprs_annotated$gene_symbol), "///", fixed = TRUE), `[`, 1)
+        gene_var <- matrixStats::rowVars(exprs_data)
+        if (nrow(exprs_data) > 300L) {
+          keep_idx <- order(gene_var, decreasing = TRUE)
+          exprs_data <- exprs_data[keep_idx[seq_len(300L)], , drop = FALSE]
+        }
+        incProgress(0.35)
+
+        # Annotation map only
+        gene_col <- intersect(c("Gene symbol","Gene Symbol","Gene.symbol","GENE_SYMBOL"), colnames(feature_data))
+        gene_vec <- if (length(gene_col)) feature_data[rownames(exprs_data), gene_col[1]] else NA
+        gene_vec <- sapply(strsplit(as.character(gene_vec), "///", fixed = TRUE), `[`, 1)
+        annotation_df <- data.frame(probe_id = rownames(exprs_data), gene_symbol = gene_vec, stringsAsFactors = FALSE)
 
         data_obj$expr <- exprs_data
         data_obj$pheno <- pheno_data
-        data_obj$expr_annot <- exprs_annotated
+        incProgress(0.45)
 
-        # DEG Function
         run_deg <- function(sex_label) {
           samples <- pheno_data$`gender:ch1` == sex_label
-          exprs_sub <- exprs_annotated[, samples]
+          expr_mat <- exprs_data[, samples, drop = FALSE]
           pheno_sub <- pheno_data[samples, ]
-          exprs_matrix <- exprs_sub[, !(colnames(exprs_sub) %in% c("probe_id", "gene_symbol"))]
-
+          if (ncol(expr_mat) < 3 || length(unique(pheno_sub$`disease state:ch1`)) < 2) {
+            return(list(results = data.frame(), heat = matrix(0, nrow = 1, ncol = 1)))
+          }
           group <- factor(pheno_sub$`disease state:ch1`)
           design <- model.matrix(~0 + group)
           colnames(design) <- make.names(colnames(design))
           contrast.matrix <- makeContrasts(RA_vs_Control = groupRA - grouphealthy.control, levels = design)
-
-          fit <- lmFit(exprs_matrix, design)
-          fit2 <- contrasts.fit(fit, contrast.matrix)
-          fit2 <- eBayes(fit2)
-          results <- topTable(fit2, adjust.method = "fdr", number = Inf)
-          results$probe_id <- rownames(results)
-
-          results_annot <- merge(results, exprs_annotated[, c("probe_id", "gene_symbol")], by = "probe_id", all.x = TRUE)
-          results_annot$Regulation <- ifelse(
-            results_annot$adj.P.Val < input$pval_thresh & results_annot$logFC > input$logfc_thresh, "Upregulated",
-            ifelse(results_annot$adj.P.Val < input$pval_thresh & results_annot$logFC < -input$logfc_thresh, "Downregulated", "Not Significant")
+          fit <- lmFit(expr_mat, design)
+          fit2 <- eBayes(contrasts.fit(fit, contrast.matrix))
+          res <- topTable(fit2, adjust.method = "fdr", number = Inf)
+          res$probe_id <- rownames(res)
+          res_annot <- merge(res, annotation_df, by = "probe_id", all.x = TRUE)
+          res_annot$Regulation <- ifelse(
+            res_annot$adj.P.Val < input$pval_thresh & res_annot$logFC >  input$logfc_thresh, "Upregulated",
+            ifelse(res_annot$adj.P.Val < input$pval_thresh & res_annot$logFC < -input$logfc_thresh, "Downregulated", "Not Significant")
           )
-          return(list(results = results_annot, matrix = exprs_matrix))
+          sv <- matrixStats::rowVars(expr_mat)
+          idx <- head(order(sv, decreasing = TRUE), 40)
+          list(results = res_annot, heat = expr_mat[idx, , drop = FALSE])
         }
 
-        incProgress(0.5)
+        female <- run_deg("F"); gc(); incProgress(0.7)
+        male   <- run_deg("M"); gc(); incProgress(0.95)
 
-        # Run DEG for both
-        res_female <- run_deg("F")
-        res_male <- run_deg("M")
+        data_obj$deg_female <- female$results
+        data_obj$deg_male   <- male$results
+        data_obj$heat_female <- female$heat
+        data_obj$heat_male   <- male$heat
 
-        # Save results
-        data_obj$deg_female <- res_female$results
-        data_obj$deg_male <- res_male$results
-        data_obj$heat_female <- res_female$matrix
-        data_obj$heat_male <- res_male$matrix
-
-        data_obj$up_female <- subset(data_obj$deg_female, adj.P.Val < input$pval_thresh & logFC > input$logfc_thresh)
-        data_obj$down_female <- subset(data_obj$deg_female, adj.P.Val < input$pval_thresh & logFC < -input$logfc_thresh)
-        data_obj$up_male <- subset(data_obj$deg_male, adj.P.Val < input$pval_thresh & logFC > input$logfc_thresh)
-        data_obj$down_male <- subset(data_obj$deg_male, adj.P.Val < input$pval_thresh & logFC < -input$logfc_thresh)
+        data_obj$up_female   <- subset(data_obj$deg_female, Regulation == "Upregulated")
+        data_obj$down_female <- subset(data_obj$deg_female, Regulation == "Downregulated")
+        data_obj$up_male     <- subset(data_obj$deg_male, Regulation == "Upregulated")
+        data_obj$down_male   <- subset(data_obj$deg_male, Regulation == "Downregulated")
 
         incProgress(1)
       })
-
-      removeModal()
       showNotification("🎉 DEG analysis complete!", type = "message")
-      runjs("celebrate();")
-
     }, error = function(e) {
-      removeModal()
       showNotification(paste0("❌ Analysis failed: ", e$message), type = "error")
     })
   })
 
   # Remaining outputs (no change needed)
-  output$expr_table <- renderDT({ req(data_obj$expr); datatable(data_obj$expr, options = list(scrollX = TRUE)) })
+  output$expr_table <- renderDT({
+    req(data_obj$expr)
+    expr_preview <- data_obj$expr[seq_len(min(1000L, nrow(data_obj$expr))), , drop = FALSE]
+    datatable(as.data.frame(expr_preview), options = list(scrollX = TRUE))
+  })
   output$pheno_table <- renderDT({ req(data_obj$pheno); datatable(data_obj$pheno, options = list(scrollX = TRUE)) })
   output$deg_table_female <- renderDT({ req(data_obj$deg_female); datatable(data_obj$deg_female, options = list(scrollX = TRUE)) })
   output$deg_table_male <- renderDT({ req(data_obj$deg_male); datatable(data_obj$deg_male, options = list(scrollX = TRUE)) })
