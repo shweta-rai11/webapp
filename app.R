@@ -397,9 +397,9 @@ ui <- fluidPage(
         )
       )
       
-        )
-      )
-  
+  )
+)
+
 
 library(shiny)
 
@@ -426,14 +426,14 @@ server <- function(input, output, session) {
       showNotification(paste("❌ Failed to load data:", e$message), type = "error")
     })
   })
-
-
-
+  
+  
+  
   observeEvent(input$run, {
     req(gse_data())
-
+    
     showModal(modalDialog("Processing data...", footer = NULL))
-
+    
     tryCatch({
       withProgress(message = "Running DEG Analysis...", value = 0.1, {
         gse <- gse_data()[[1]]
@@ -441,41 +441,41 @@ server <- function(input, output, session) {
         exprs_data <- exprs(gse)
         pheno_data <- pData(gse)
         feature_data <- fData(gse)
-
+        
         # Data preprocessing
         exprs_data <- exprs_data[complete.cases(exprs_data), ]
         exprs_data <- exprs_data[apply(exprs_data, 1, var) > 0.01, ]
         exprs_data <- log2(exprs_data + 1)
         threshold <- quantile(rowMeans(exprs_data), 0.25)
         exprs_data <- exprs_data[rowMeans(exprs_data) > threshold, ]
-
+        
         # Annotate with gene symbols
         exprs_annotated <- data.frame(probe_id = rownames(exprs_data), exprs_data)
         exprs_annotated$gene_symbol <- feature_data[rownames(exprs_data), "Gene symbol"]
         exprs_annotated$gene_symbol <- sapply(strsplit(as.character(exprs_annotated$gene_symbol), "///", fixed = TRUE), `[`, 1)
-
+        
         data_obj$expr <- exprs_data
         data_obj$pheno <- pheno_data
         data_obj$expr_annot <- exprs_annotated
-
+        
         # DEG Function
         run_deg <- function(sex_label) {
           samples <- pheno_data$`gender:ch1` == sex_label
           exprs_sub <- exprs_annotated[, samples]
           pheno_sub <- pheno_data[samples, ]
           exprs_matrix <- exprs_sub[, !(colnames(exprs_sub) %in% c("probe_id", "gene_symbol"))]
-
+          
           group <- factor(pheno_sub$`disease state:ch1`)
           design <- model.matrix(~0 + group)
           colnames(design) <- make.names(colnames(design))
           contrast.matrix <- makeContrasts(RA_vs_Control = groupRA - grouphealthy.control, levels = design)
-
+          
           fit <- lmFit(exprs_matrix, design)
           fit2 <- contrasts.fit(fit, contrast.matrix)
           fit2 <- eBayes(fit2)
           results <- topTable(fit2, adjust.method = "fdr", number = Inf)
           results$probe_id <- rownames(results)
-
+          
           results_annot <- merge(results, exprs_annotated[, c("probe_id", "gene_symbol")], by = "probe_id", all.x = TRUE)
           results_annot$Regulation <- ifelse(
             results_annot$adj.P.Val < input$pval_thresh & results_annot$logFC > input$logfc_thresh, "Upregulated",
@@ -483,37 +483,37 @@ server <- function(input, output, session) {
           )
           return(list(results = results_annot, matrix = exprs_matrix))
         }
-
+        
         incProgress(0.5)
-
+        
         # Run DEG for both
         res_female <- run_deg("F")
         res_male <- run_deg("M")
-
+        
         # Save results
         data_obj$deg_female <- res_female$results
         data_obj$deg_male <- res_male$results
         data_obj$heat_female <- res_female$matrix
         data_obj$heat_male <- res_male$matrix
-
+        
         data_obj$up_female <- subset(data_obj$deg_female, adj.P.Val < input$pval_thresh & logFC > input$logfc_thresh)
         data_obj$down_female <- subset(data_obj$deg_female, adj.P.Val < input$pval_thresh & logFC < -input$logfc_thresh)
         data_obj$up_male <- subset(data_obj$deg_male, adj.P.Val < input$pval_thresh & logFC > input$logfc_thresh)
         data_obj$down_male <- subset(data_obj$deg_male, adj.P.Val < input$pval_thresh & logFC < -input$logfc_thresh)
-
+        
         incProgress(1)
       })
-
+      
       removeModal()
       showNotification("🎉 DEG analysis complete!", type = "message")
       runjs("celebrate();")
-
+      
     }, error = function(e) {
       removeModal()
       showNotification(paste0("❌ Analysis failed: ", e$message), type = "error")
     })
   })
-
+  
   # Remaining outputs (no change needed)
   output$expr_table <- renderDT({ req(data_obj$expr); datatable(data_obj$expr, options = list(scrollX = TRUE)) })
   output$pheno_table <- renderDT({ req(data_obj$pheno); datatable(data_obj$pheno, options = list(scrollX = TRUE)) })
@@ -521,7 +521,7 @@ server <- function(input, output, session) {
   output$deg_table_male <- renderDT({ req(data_obj$deg_male); datatable(data_obj$deg_male, options = list(scrollX = TRUE)) })
   output$deg_summary_female <- renderPrint({ req(data_obj$deg_female); print(table(data_obj$deg_female$Regulation)) })
   output$deg_summary_male <- renderPrint({ req(data_obj$deg_male); print(table(data_obj$deg_male$Regulation)) })
-
+  
   output$volcano_female <- renderPlot({
     req(data_obj$deg_female)
     ggplot(data_obj$deg_female, aes(x = logFC, y = -log10(adj.P.Val), color = Regulation)) +
@@ -531,7 +531,7 @@ server <- function(input, output, session) {
       labs(title = "Volcano Plot - Female", x = "log2 Fold Change", y = "-log10 Adjusted P-value") +
       theme(plot.title = element_text(face = "bold", size = 16))
   })
-
+  
   output$volcano_male <- renderPlot({
     req(data_obj$deg_male)
     ggplot(data_obj$deg_male, aes(x = logFC, y = -log10(adj.P.Val), color = Regulation)) +
@@ -541,7 +541,7 @@ server <- function(input, output, session) {
       labs(title = "Volcano Plot - Male", x = "log2 Fold Change", y = "-log10 Adjusted P-value") +
       theme(plot.title = element_text(face = "bold", size = 16))
   })
-
+  
   output$heatmap_female <- renderPlot({
     req(data_obj$heat_female)
     tryCatch({
@@ -553,7 +553,7 @@ server <- function(input, output, session) {
       showNotification("Error generating Female Heatmap.", type = "error")
     })
   })
-
+  
   output$heatmap_male <- renderPlot({
     req(data_obj$heat_male)
     tryCatch({
@@ -565,7 +565,7 @@ server <- function(input, output, session) {
       showNotification("Error generating Male Heatmap.", type = "error")
     })
   })
-
+  
   # Downloads
   output$download_up_female <- downloadHandler(
     filename = function() { "upregulated_female.csv" },
@@ -583,7 +583,7 @@ server <- function(input, output, session) {
     filename = function() { "downregulated_male.csv" },
     content = function(file) { write.csv(data_obj$down_male, file, row.names = FALSE) }
   )
-
+  
   output$summary_counts <- renderPrint({
     req(data_obj$deg_female)
     cat("Disease State Counts:\n")
@@ -591,7 +591,7 @@ server <- function(input, output, session) {
     cat("\nGender Counts:\n")
     print(table(data_obj$pheno$gender))
   })
-
+  
   output$sample_info <- renderPrint({
     req(data_obj$pheno)
     cat(capture.output(str(data_obj$pheno)), sep = "\n")
